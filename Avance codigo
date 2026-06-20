@@ -1,0 +1,228 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <time.h>
+
+#define UMBRAL_CPU 80
+#define UMBRAL_RAM 80
+
+pthread_mutex_t mutex;
+
+float uso_cpu = 0;
+float uso_ram = 0;
+
+/* Función para guardar alertas en un archivo */
+void guardar_alerta(const char *mensaje) {
+    FILE *archivo = fopen("alertas.log", "a");
+
+    if (archivo == NULL) {
+        printf("Error al abrir el archivo de alertas.\n");
+        return;
+    }
+
+    time_t tiempo = time(NULL);
+    fprintf(archivo, "[%s] %s\n", ctime(&tiempo), mensaje);
+
+    fclose(archivo);
+}
+
+/* Simulación simple del uso de CPU */
+float obtener_cpu() {
+    FILE *archivo;
+    long user1, nice1, system1, idle1;
+    long user2, nice2, system2, idle2;
+
+    archivo = fopen("/proc/stat", "r");
+    if (archivo == NULL) {
+        return 0;
+    }
+
+    fscanf(archivo, "cpu %ld %ld %ld %ld", &user1, &nice1, &system1, &idle1);
+    fclose(archivo);
+
+    usleep(500000);
+
+    archivo = fopen("/proc/stat", "r");
+    if (archivo == NULL) {
+        return 0;
+    }
+
+    fscanf(archivo, "cpu %ld %ld %ld %ld", &user2, &nice2, &system2, &idle2);
+    fclose(archivo);
+
+    long total1 = user1 + nice1 + system1 + idle1;
+    long total2 = user2 + nice2 + system2 + idle2;
+
+    long total_diff = total2 - total1;
+    long idle_diff = idle2 - idle1;
+
+    if (total_diff == 0) {
+        return 0;
+    }
+
+    return (float)(total_diff - idle_diff) * 100 / total_diff;
+}
+
+/* Obtener uso de memoria RAM desde /proc/meminfo */
+float obtener_ram() {
+    FILE *archivo;
+    char etiqueta[50];
+    long memoria_total = 0;
+    long memoria_disponible = 0;
+    long valor;
+    char unidad[10];
+
+    archivo = fopen("/proc/meminfo", "r");
+
+    if (archivo == NULL) {
+        return 0;
+    }
+
+    while (fscanf(archivo, "%s %ld %s", etiqueta, &valor, unidad) != EOF) {
+        if (strcmp(etiqueta, "MemTotal:") == 0) {
+            memoria_total = valor;
+        }
+
+        if (strcmp(etiqueta, "MemAvailable:") == 0) {
+            memoria_disponible = valor;
+            break;
+        }
+    }
+
+    fclose(archivo);
+
+    if (memoria_total == 0) {
+        return 0;
+    }
+
+    long memoria_usada = memoria_total - memoria_disponible;
+    return (float)memoria_usada * 100 / memoria_total;
+}
+
+/* Hilo para monitorear CPU */
+void *monitorear_cpu(void *arg) {
+    while (1) {
+        float cpu_actual = obtener_cpu();
+
+        pthread_mutex_lock(&mutex);
+        uso_cpu = cpu_actual;
+        pthread_mutex_unlock(&mutex);
+
+        printf("\n[CPU] Uso actual: %.2f%%\n", cpu_actual);
+
+        if (cpu_actual > UMBRAL_CPU) {
+            printf("[ALERTA] Uso alto de CPU detectado.\n");
+            guardar_alerta("Uso alto de CPU detectado.");
+        }
+
+        sleep(3);
+    }
+
+    return NULL;
+}
+
+/* Hilo para monitorear RAM */
+void *monitorear_ram(void *arg) {
+    while (1) {
+        float ram_actual = obtener_ram();
+
+        pthread_mutex_lock(&mutex);
+        uso_ram = ram_actual;
+        pthread_mutex_unlock(&mutex);
+
+        printf("[RAM] Uso actual: %.2f%%\n", ram_actual);
+
+        if (ram_actual > UMBRAL_RAM) {
+            printf("[ALERTA] Uso alto de memoria RAM detectado.\n");
+            guardar_alerta("Uso alto de memoria RAM detectado.");
+        }
+
+        sleep(3);
+    }
+
+    return NULL;
+}
+
+/* Hilo para mostrar procesos y usuarios */
+void *monitorear_procesos_usuarios(void *arg) {
+    while (1) {
+        printf("\n===== USUARIOS CONECTADOS =====\n");
+        system("who");
+
+        printf("\n===== TOP 5 PROCESOS POR USO DE CPU =====\n");
+        system("ps -eo pid,ppid,comm,%cpu,%mem --sort=-%cpu | head -n 6");
+
+        sleep(8);
+    }
+
+    return NULL;
+}
+
+/* Simulador de carga usando fork */
+void simulador_carga() {
+    pid_t pid;
+    int cantidad = 3;
+
+    printf("\n[SIMULADOR] Creando procesos de carga...\n");
+
+    for (int i = 0; i < cantidad; i++) {
+        pid = fork();
+
+        if (pid == 0) {
+            printf("[HIJO] Proceso hijo creado. PID: %d\n", getpid());
+
+            long contador = 0;
+            while (contador < 900000000) {
+                contador++;
+            }
+
+            printf("[HIJO] Proceso hijo terminado. PID: %d\n", getpid());
+            exit(0);
+        }
+    }
+
+    for (int i = 0; i < cantidad; i++) {
+        wait(NULL);
+    }
+
+    printf("[SIMULADOR] Procesos de carga finalizados.\n");
+}
+
+int main() {
+    pthread_t hilo_cpu;
+    pthread_t hilo_ram;
+    pthread_t hilo_procesos;
+
+    int opcion;
+
+    pthread_mutex_init(&mutex, NULL);
+
+    printf("=====================================\n");
+    printf("        SYS GUARDIAN - LINUX          \n");
+    printf(" Monitor de Procesos y Recursos       \n");
+    printf("=====================================\n");
+
+    printf("\n¿Deseas ejecutar simulador de carga?\n");
+    printf("1. Sí\n");
+    printf("2. No\n");
+    printf("Opción: ");
+    scanf("%d", &opcion);
+
+    if (opcion == 1) {
+        simulador_carga();
+    }
+
+    pthread_create(&hilo_cpu, NULL, monitorear_cpu, NULL);
+    pthread_create(&hilo_ram, NULL, monitorear_ram, NULL);
+    pthread_create(&hilo_procesos, NULL, monitorear_procesos_usuarios, NULL);
+
+    pthread_join(hilo_cpu, NULL);
+    pthread_join(hilo_ram, NULL);
+    pthread_join(hilo_procesos, NULL);
+
+    pthread_mutex_destroy(&mutex);
+
+    return 0;
+}
